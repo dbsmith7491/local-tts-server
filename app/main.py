@@ -20,9 +20,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
-    title="Jim TTS Server",
+    title="Local TTS Server",
     version="1.0.0",
-    description="Drunk dart commentator TTS service"
+    description="Voice cloning TTS service with personality transformations"
 )
 
 # CORS
@@ -58,7 +58,7 @@ async def startup_event():
     local_ip = get_local_ip()
 
     logger.info("=" * 70)
-    logger.info("🍺 Jim TTS Server Starting...")
+    logger.info("🎙️  Local TTS Server Starting...")
     logger.info("=" * 70)
     logger.info(f"📡 Network: https://{local_ip}:{settings.server_port}")
     logger.info("=" * 70)
@@ -84,7 +84,7 @@ async def startup_event():
             await cache_manager.pregenerate_common_phrases()
 
         logger.info("=" * 70)
-        logger.info("✅ Server ready! Jim is standing by...")
+        logger.info("✅ Server ready! TTS engine loaded and standing by...")
         logger.info("=" * 70)
 
     except Exception as e:
@@ -96,7 +96,7 @@ async def root():
     """Server info"""
     return {
         "status": "online",
-        "message": "Jim TTS Server - HTTP Edition",
+        "message": "Local TTS Server - Voice Cloning Edition",
         "version": "1.0.0",
         "protocol": "HTTPS",
         "endpoints": {
@@ -129,7 +129,7 @@ async def download_certificate():
     return FileResponse(
         cert_path,
         media_type="application/x-pem-file",
-        filename="jim-tts-server.pem"
+        filename="local-tts-server.pem"
     )
 
 @app.post("/tts/generate")

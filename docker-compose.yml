@@ -3,7 +3,7 @@ version: '3.8'
 services:
   tts-server:
     build: .
-    container_name: jim-tts-server
+    container_name: local-tts-server
     restart: unless-stopped
     ports:
       - "8000:8000"
