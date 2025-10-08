@@ -1,0 +1,1277 @@
+# Jim TTS Server Implementation Guide for Claude Code
+
+## Quick Start
+
+This guide is designed for Claude Code to build a containerized TTS server that generates drunk dart game commentary. The server uses simple HTTP (no WebSocket) and is designed to be portable across MacBook → Windows → AWS.
+
+---
+
+## Project Overview
+
+**What we're building:**
+- FastAPI server serving TTS-generated audio
+- Voice cloning using Coqui XTTS v2
+- "Drunk personality" text transformations
+- Audio caching for instant playback
+- HTTPS with self-signed certificates
+- Docker containerization for portability
+
+**Technology Stack:**
+- Python 3.11
+- FastAPI + Uvicorn
+- Coqui TTS (XTTS v2)
+- Docker + docker-compose
+- CUDA support (optional, falls back to CPU)
+
+---
+
+## Project Structure
+
+Create this exact structure:
+
+```
+jim-tts-server/
+├── .dockerignore
+├── .env.example
+├── .gitignore
+├── Dockerfile
+├── docker-compose.yml
+├── docker-compose.gpu.yml
+├── requirements.txt
+├── README.md
+│
+├── app/
+│   ├── __init__.py
+│   ├── main.py
+│   ├── config.py
+│   ├── tts_engine.py
+│   ├── jim_personality.py
+│   └── cache_manager.py
+│
+├── scripts/
+│   ├── generate_cert.sh
+│   ├── test_server.py
+│   └── setup_voice.sh
+│
+├── voices/
+│   └── .gitkeep
+│
+├── cache/
+│   └── pregenerated/
+│       └── .gitkeep
+│
+└── certs/
+    └── .gitkeep
+```
+
+---
+
+## File-by-File Implementation
+
+### 1. Dockerfile
+
+```dockerfile
+# Use CUDA base image for optional GPU support
+FROM nvidia/cuda:12.1.0-base-ubuntu22.04
+
+# Prevent interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    python3.11 \
+    python3-pip \
+    ffmpeg \
+    libsndfile1 \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Python 3.11 as default
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
+RUN update-alternatives --install /usr/bin/pip pip /usr/bin/pip3 1
+
+# Set working directory
+WORKDIR /app
+
+# Copy requirements first (for Docker layer caching)
+COPY requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Download TTS model at build time (optional, saves startup time)
+RUN python -c "from TTS.api import TTS; TTS('tts_models/multilingual/multi-dataset/xtts_v2')"
+
+# Copy application code
+COPY app/ ./app/
+COPY scripts/ ./scripts/
+
+# Create necessary directories
+RUN mkdir -p /app/voices /app/cache/pregenerated /app/certs
+
+# Expose port
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD python -c "import requests; requests.get('http://localhost:8000/health', timeout=5)"
+
+# Run the application
+CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--ssl-keyfile", "/app/certs/key.pem", "--ssl-certfile", "/app/certs/cert.pem"]
+```
+
+### 2. docker-compose.yml (CPU Version)
+
+```yaml
+version: '3.8'
+
+services:
+  tts-server:
+    build: .
+    container_name: jim-tts-server
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./voices:/app/voices:ro
+      - ./cache:/app/cache
+      - ./certs:/app/certs:ro
+    environment:
+      - TTS_DEVICE=cpu
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8000
+      - LOG_LEVEL=INFO
+      - TTS_MODEL=tts_models/multilingual/multi-dataset/xtts_v2
+      - SPEAKER_WAV=/app/voices/jim_voice.wav
+      - CACHE_DIR=/app/cache/pregenerated
+      - PREGENERATE_ON_STARTUP=true
+      - SSL_CERT_PATH=/app/certs/cert.pem
+      - SSL_KEY_PATH=/app/certs/key.pem
+      - CORS_ORIGINS=*
+    healthcheck:
+      test: ["CMD", "curl", "-k", "-f", "https://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+```
+
+### 3. docker-compose.gpu.yml (GPU Version)
+
+```yaml
+version: '3.8'
+
+services:
+  tts-server:
+    extends:
+      file: docker-compose.yml
+      service: tts-server
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - TTS_DEVICE=cuda
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8000
+      - LOG_LEVEL=INFO
+      - TTS_MODEL=tts_models/multilingual/multi-dataset/xtts_v2
+      - SPEAKER_WAV=/app/voices/jim_voice.wav
+      - CACHE_DIR=/app/cache/pregenerated
+      - PREGENERATE_ON_STARTUP=true
+      - SSL_CERT_PATH=/app/certs/cert.pem
+      - SSL_KEY_PATH=/app/certs/key.pem
+      - CORS_ORIGINS=*
+```
+
+### 4. requirements.txt
+
+```txt
+# FastAPI and server
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+python-multipart==0.0.6
+
+# TTS
+TTS==0.22.0
+
+# PyTorch (CPU version - GPU version auto-detected)
+torch==2.1.2
+torchaudio==2.1.2
+
+# Audio processing
+scipy==1.11.4
+numpy==1.24.3
+soundfile==0.12.1
+
+# Utilities
+pydantic==2.5.3
+pydantic-settings==2.1.0
+python-dotenv==1.0.0
+
+# HTTP client for testing
+requests==2.31.0
+```
+
+### 5. app/__init__.py
+
+```python
+# Empty file to make app a package
+```
+
+### 6. app/config.py
+
+```python
+from pydantic_settings import BaseSettings
+from typing import List
+
+class Settings(BaseSettings):
+    # Server settings
+    server_host: str = "0.0.0.0"
+    server_port: int = 8000
+    log_level: str = "INFO"
+    
+    # TTS settings
+    tts_model: str = "tts_models/multilingual/multi-dataset/xtts_v2"
+    tts_device: str = "cpu"  # 'cpu' or 'cuda'
+    speaker_wav: str = "/app/voices/jim_voice.wav"
+    
+    # Cache settings
+    cache_dir: str = "/app/cache/pregenerated"
+    pregenerate_on_startup: bool = True
+    
+    # SSL settings
+    ssl_cert_path: str = "/app/certs/cert.pem"
+    ssl_key_path: str = "/app/certs/key.pem"
+    
+    # CORS
+    cors_origins: List[str] = ["*"]
+    
+    class Config:
+        env_file = ".env"
+        case_sensitive = False
+
+settings = Settings()
+```
+
+### 7. app/tts_engine.py
+
+```python
+from TTS.api import TTS
+import torch
+import numpy as np
+import io
+from scipy.io.wavfile import write
+import logging
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+class TTSEngine:
+    def __init__(self, model_name: str, device: str = "cuda", speaker_wav: str = None):
+        """
+        Initialize TTS engine
+        
+        Args:
+            model_name: HuggingFace model name
+            device: 'cuda' or 'cpu'
+            speaker_wav: Path to reference voice sample
+        """
+        # Check if CUDA is actually available
+        self.device = device if torch.cuda.is_available() and device == "cuda" else "cpu"
+        
+        if device == "cuda" and self.device == "cpu":
+            logger.warning("CUDA requested but not available, falling back to CPU")
+        
+        logger.info(f"Initializing TTS on {self.device}")
+        
+        # Load model
+        self.tts = TTS(model_name).to(self.device)
+        
+        # Check if speaker wav exists
+        self.speaker_wav = speaker_wav
+        if speaker_wav and not Path(speaker_wav).exists():
+            logger.warning(f"Speaker wav not found: {speaker_wav}")
+            logger.warning("Will use default speaker instead")
+            self.speaker_wav = None
+        
+        self.sample_rate = 22050
+        
+        logger.info(f"✅ TTS model loaded: {model_name}")
+        if self.speaker_wav:
+            logger.info(f"✅ Using voice clone: {self.speaker_wav}")
+        else:
+            logger.info("ℹ️  Using default speaker (no voice clone)")
+    
+    def is_gpu_available(self) -> bool:
+        """Check if GPU is being used"""
+        return torch.cuda.is_available() and self.device == "cuda"
+    
+    async def generate_audio(self, text: str, speed: float = 0.95) -> bytes:
+        """
+        Generate audio from text
+        
+        Args:
+            text: Text to synthesize
+            speed: Speech rate (0.8-1.2, lower = slower/more drunk)
+        
+        Returns:
+            WAV audio as bytes
+        """
+        try:
+            # Generate audio array
+            if self.speaker_wav:
+                # Use voice cloning
+                wav = self.tts.tts(
+                    text=text,
+                    speaker_wav=self.speaker_wav,
+                    language="en",
+                    speed=speed
+                )
+            else:
+                # Use default speaker
+                wav = self.tts.tts(text=text, language="en", speed=speed)
+            
+            # Convert to WAV bytes
+            wav_array = np.array(wav)
+            
+            # Create WAV file in memory
+            buffer = io.BytesIO()
+            write(buffer, self.sample_rate, wav_array.astype(np.float32))
+            buffer.seek(0)
+            
+            return buffer.read()
+            
+        except Exception as e:
+            logger.error(f"Error generating audio: {e}")
+            raise
+    
+    def get_voice_info(self) -> dict:
+        """Get information about loaded voice"""
+        return {
+            "model": self.tts.model_name,
+            "device": self.device,
+            "speaker_wav": self.speaker_wav,
+            "sample_rate": self.sample_rate
+        }
+```
+
+### 8. app/jim_personality.py
+
+```python
+import random
+import re
+
+class JimPersonality:
+    """Adds drunk, inappropriate personality to text"""
+    
+    def __init__(self):
+        # Drunk speech patterns
+        self.drunk_replacements = {
+            "what": ["whaaaat", "wha", "what the hell"],
+            "that": ["thaaaat", "that's", "tha"],
+            "oh": ["ohhhhh", "oooooh", "oh my"],
+            "wow": ["wooooow", "woah", "holy shit"],
+            "nice": ["niiiiice", "nice!", "well well well"],
+            "miss": ["*hiccup* miss", "missed!", "airballed that one"],
+        }
+        
+        # Jim's verbal tics
+        self.interjections = [
+            "*burps*",
+            "*chuckles*",
+            "*hiccup*",
+            "hehe...",
+            "ahahaha...",
+            "*mutters under breath*",
+            "*slurps drink*",
+        ]
+        
+        # Filler words for rambling
+        self.fillers = [
+            "uhhhh",
+            "ya know",
+            "like",
+            "I mean",
+            "wait what was I saying",
+            "anyway",
+        ]
+    
+    def enhance_text(self, text: str, quality: str = None) -> str:
+        """
+        Make text sound like drunk Jim
+        
+        Args:
+            text: Original commentary
+            quality: Throw quality (great, good, okay, bad, miss, bust, game_winner)
+        
+        Returns:
+            Enhanced text with Jim's personality
+        """
+        enhanced = text
+        
+        # Add pauses and ellipses for drunk rambling
+        enhanced = enhanced.replace(", ", "... ")
+        enhanced = enhanced.replace(". ", "... ")
+        
+        # Replace words with drunk versions
+        for word, replacements in self.drunk_replacements.items():
+            if word in enhanced.lower():
+                if random.random() < 0.4:  # 40% chance
+                    drunk_version = random.choice(replacements)
+                    # Case-insensitive replacement
+                    pattern = re.compile(re.escape(word), re.IGNORECASE)
+                    enhanced = pattern.sub(drunk_version, enhanced, count=1)
+        
+        # Add interjections based on throw quality
+        if quality in ["great", "game_winner"]:
+            if random.random() < 0.6:
+                interjection = random.choice(["*laughs*", "wooooow", "holy shit"])
+                enhanced = f"{interjection} {enhanced}"
+        
+        elif quality in ["bad", "miss"]:
+            if random.random() < 0.5:
+                interjection = random.choice(["*burps*", "*chuckles*", "oooooh"])
+                enhanced = f"{interjection} {enhanced}"
+        
+        # Randomly add fillers for rambling effect
+        if random.random() < 0.3:
+            filler = random.choice(self.fillers)
+            # Insert filler in the middle
+            words = enhanced.split()
+            if len(words) > 3:
+                insert_pos = len(words) // 2
+                words.insert(insert_pos, filler)
+                enhanced = " ".join(words)
+        
+        # Add occasional trailing off
+        if random.random() < 0.2:
+            enhanced += "..."
+        
+        return enhanced
+```
+
+### 9. app/cache_manager.py
+
+```python
+import hashlib
+import pickle
+from pathlib import Path
+import logging
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+class AudioCacheManager:
+    """Manages pre-generated and cached audio"""
+    
+    def __init__(self, tts_engine, jim_personality, cache_dir: str = "cache/pregenerated"):
+        self.tts_engine = tts_engine
+        self.jim_personality = jim_personality
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        
+        # In-memory cache for fastest access
+        self.memory_cache = {}
+        
+        # Load existing cache from disk
+        self._load_disk_cache()
+    
+    def _get_cache_key(self, text: str) -> str:
+        """Generate cache key from text"""
+        return hashlib.md5(text.encode()).hexdigest()
+    
+    def _load_disk_cache(self):
+        """Load cached audio files from disk into memory"""
+        logger.info("Loading cached audio from disk...")
+        count = 0
+        
+        for cache_file in self.cache_dir.glob("*.pkl"):
+            try:
+                with open(cache_file, 'rb') as f:
+                    data = pickle.load(f)
+                    self.memory_cache[data['key']] = data['audio']
+                    count += 1
+            except Exception as e:
+                logger.error(f"Error loading cache file {cache_file}: {e}")
+        
+        logger.info(f"📦 Loaded {count} cached audio files")
+    
+    def get_cached(self, text: str) -> Optional[bytes]:
+        """Get cached audio for text"""
+        key = self._get_cache_key(text)
+        return self.memory_cache.get(key)
+    
+    def cache_audio(self, text: str, audio_bytes: bytes):
+        """Cache audio in memory and on disk"""
+        key = self._get_cache_key(text)
+        
+        # Store in memory
+        self.memory_cache[key] = audio_bytes
+        
+        # Store on disk
+        cache_file = self.cache_dir / f"{key}.pkl"
+        try:
+            with open(cache_file, 'wb') as f:
+                pickle.dump({'key': key, 'text': text, 'audio': audio_bytes}, f)
+        except Exception as e:
+            logger.error(f"Error caching to disk: {e}")
+    
+    def get_cache_size(self) -> int:
+        """Get number of cached items"""
+        return len(self.memory_cache)
+    
+    def clear_cache(self):
+        """Clear all cached audio"""
+        self.memory_cache.clear()
+        for cache_file in self.cache_dir.glob("*.pkl"):
+            try:
+                cache_file.unlink()
+            except Exception as e:
+                logger.error(f"Error deleting cache file: {e}")
+        logger.info("Cache cleared")
+    
+    async def pregenerate_common_phrases(self):
+        """Pre-generate frequently used phrases"""
+        common_phrases = [
+            "Nice throw!",
+            "Ohhh, that's a miss!",
+            "Triple twenty! Amazing!",
+            "Bullseye! Holy shit!",
+            "You suck at this!",
+            "Are you even trying?",
+            "*burps* Sorry about that...",
+            "Next player!",
+            "Game over!",
+            "What a comeback!",
+        ]
+        
+        generated = 0
+        for phrase in common_phrases:
+            if not self.get_cached(phrase):
+                logger.info(f"Pre-generating: {phrase}")
+                enhanced = self.jim_personality.enhance_text(phrase)
+                audio = await self.tts_engine.generate_audio(enhanced)
+                self.cache_audio(phrase, audio)
+                generated += 1
+        
+        logger.info(f"✅ Pre-generated {generated} new phrases ({len(common_phrases) - generated} were cached)")
+```
+
+### 10. app/main.py
+
+```python
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import Response, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
+import socket
+import logging
+from pathlib import Path
+from typing import Optional
+
+from .tts_engine import TTSEngine
+from .jim_personality import JimPersonality
+from .cache_manager import AudioCacheManager
+from .config import settings
+
+# Setup logging
+logging.basicConfig(
+    level=getattr(logging, settings.log_level),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+app = FastAPI(
+    title="Jim TTS Server",
+    version="1.0.0",
+    description="Drunk dart commentator TTS service"
+)
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Global instances
+tts_engine: Optional[TTSEngine] = None
+jim_personality: Optional[JimPersonality] = None
+cache_manager: Optional[AudioCacheManager] = None
+
+def get_local_ip():
+    """Get local IP address"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+        return local_ip
+    except Exception:
+        return "Unable to determine"
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize TTS engine"""
+    global tts_engine, jim_personality, cache_manager
+    
+    local_ip = get_local_ip()
+    
+    logger.info("=" * 70)
+    logger.info("🍺 Jim TTS Server Starting...")
+    logger.info("=" * 70)
+    logger.info(f"📡 Network: https://{local_ip}:{settings.server_port}")
+    logger.info("=" * 70)
+    
+    try:
+        logger.info("Loading TTS model...")
+        tts_engine = TTSEngine(
+            model_name=settings.tts_model,
+            device=settings.tts_device,
+            speaker_wav=settings.speaker_wav
+        )
+        
+        jim_personality = JimPersonality()
+        cache_manager = AudioCacheManager(
+            tts_engine, 
+            jim_personality,
+            cache_dir=settings.cache_dir
+        )
+        
+        if settings.pregenerate_on_startup:
+            logger.info("Pre-generating common phrases...")
+            await cache_manager.pregenerate_common_phrases()
+        
+        logger.info("=" * 70)
+        logger.info("✅ Server ready! Jim is standing by...")
+        logger.info("=" * 70)
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize: {e}")
+        raise
+
+@app.get("/")
+async def root():
+    """Server info"""
+    return {
+        "status": "online",
+        "message": "Jim TTS Server - HTTP Edition",
+        "version": "1.0.0",
+        "protocol": "HTTPS",
+        "endpoints": {
+            "health": "/health",
+            "generate": "/tts/generate",
+            "batch": "/tts/batch-pregenerate",
+            "certificate": "/download-cert",
+            "cache_stats": "/cache/stats"
+        }
+    }
+
+@app.get("/health")
+async def health():
+    """Health check"""
+    return {
+        "status": "healthy",
+        "tts_engine": "loaded" if tts_engine else "not loaded",
+        "gpu_available": tts_engine.is_gpu_available() if tts_engine else False,
+        "cached_items": cache_manager.get_cache_size() if cache_manager else 0,
+        "model": tts_engine.get_voice_info() if tts_engine else None
+    }
+
+@app.get("/download-cert")
+async def download_certificate():
+    """Download SSL certificate for iOS installation"""
+    cert_path = Path(settings.ssl_cert_path)
+    if not cert_path.exists():
+        raise HTTPException(status_code=404, detail="Certificate not found")
+    
+    return FileResponse(
+        cert_path,
+        media_type="application/x-pem-file",
+        filename="jim-tts-server.pem"
+    )
+
+@app.post("/tts/generate")
+async def generate_commentary(
+    text: str,
+    quality: Optional[str] = None,
+    use_personality: bool = True
+) -> Response:
+    """
+    Generate single commentary audio
+    
+    Args:
+        text: Commentary text
+        quality: Throw quality (great, good, okay, bad, miss, bust, game_winner)
+        use_personality: Apply Jim's personality transformation
+    
+    Returns:
+        WAV audio file
+    """
+    if not tts_engine:
+        raise HTTPException(status_code=503, detail="TTS engine not ready")
+    
+    try:
+        # Check cache first
+        cached = cache_manager.get_cached(text)
+        if cached:
+            logger.info(f"Cache hit: {text[:50]}...")
+            return Response(
+                content=cached,
+                media_type="audio/wav",
+                headers={"X-Cache": "HIT"}
+            )
+        
+        # Generate
+        logger.info(f"Generating: {text[:50]}...")
+        
+        enhanced = jim_personality.enhance_text(text, quality) if use_personality else text
+        audio = await tts_engine.generate_audio(enhanced)
+        
+        # Cache and return
+        cache_manager.cache_audio(text, audio)
+        
+        return Response(
+            content=audio,
+            media_type="audio/wav",
+            headers={"X-Cache": "MISS"}
+        )
+        
+    except Exception as e:
+        logger.error(f"Generation error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/tts/batch-pregenerate")
+async def batch_pregenerate(items: list[dict]):
+    """
+    Pre-generate multiple commentaries for instant playback
+    
+    Body: [
+        {"text": "Nice throw!", "quality": "great"},
+        {"text": "Missed it!", "quality": "miss"}
+    ]
+    """
+    if not cache_manager:
+        raise HTTPException(status_code=503, detail="Cache not ready")
+    
+    results = []
+    
+    for item in items:
+        text = item.get("text", "")
+        quality = item.get("quality")
+        
+        if not text:
+            continue
+        
+        # Check if already cached
+        if cache_manager.get_cached(text):
+            results.append({"text": text, "status": "cached"})
+            continue
+        
+        # Generate and cache
+        try:
+            enhanced = jim_personality.enhance_text(text, quality)
+            audio = await tts_engine.generate_audio(enhanced)
+            cache_manager.cache_audio(text, audio)
+            results.append({"text": text, "status": "generated"})
+            logger.info(f"Pre-generated: {text[:50]}...")
+            
+        except Exception as e:
+            logger.error(f"Failed to generate '{text}': {e}")
+            results.append({"text": text, "status": "failed", "error": str(e)})
+    
+    return {
+        "status": "complete",
+        "results": results,
+        "total_cached": cache_manager.get_cache_size()
+    }
+
+@app.get("/cache/stats")
+async def cache_stats():
+    """Get cache statistics"""
+    if not cache_manager:
+        raise HTTPException(status_code=503, detail="Cache not ready")
+    
+    return {
+        "total_items": cache_manager.get_cache_size(),
+        "cache_dir": str(settings.cache_dir)
+    }
+
+@app.delete("/cache/clear")
+async def clear_cache():
+    """Clear all cached audio"""
+    if not cache_manager:
+        raise HTTPException(status_code=503, detail="Cache not ready")
+    
+    try:
+        cache_manager.clear_cache()
+        return {"status": "success", "message": "Cache cleared"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+```
+
+### 11. scripts/generate_cert.sh
+
+```bash
+#!/bin/bash
+
+echo "🔐 Generating SSL Certificate for Jim TTS Server"
+echo "================================================"
+
+# Get local IP
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    LOCAL_IP=$(ipconfig getifaddr en0 || ipconfig getifaddr en1)
+elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+    LOCAL_IP=$(hostname -I | awk '{print $1}')
+else
+    echo "Unable to detect OS. Please enter your IP manually:"
+    read LOCAL_IP
+fi
+
+echo "Your local IP: $LOCAL_IP"
+echo ""
+
+# Create config file
+cat > cert_config.cnf << EOF
+[req]
+default_bits = 4096
+prompt = no
+default_md = sha256
+distinguished_name = dn
+x509_extensions = v3_req
+
+[dn]
+C = US
+ST = State
+L = City
+O = JimTTS
+OU = Development
+CN = $LOCAL_IP
+
+[v3_req]
+subjectAltName = @alt_names
+keyUsage = digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+
+[alt_names]
+DNS.1 = localhost
+DNS.2 = *.local
+IP.1 = $LOCAL_IP
+IP.2 = 127.0.0.1
+EOF
+
+# Generate certificate
+openssl req -x509 -newkey rsa:4096 -nodes \
+    -keyout certs/key.pem \
+    -out certs/cert.pem \
+    -days 365 \
+    -config cert_config.cnf \
+    -extensions v3_req
+
+echo ""
+echo "✅ Certificate generated successfully!"
+echo ""
+echo "Files created:"
+echo "  - certs/cert.pem (certificate)"
+echo "  - certs/key.pem (private key)"
+echo ""
+echo "📱 For iOS:"
+echo "  Visit https://$LOCAL_IP:8000/download-cert in Safari"
+echo "  Install the certificate profile"
+echo "  Trust it in Settings"
+echo ""
+
+# Clean up
+rm cert_config.cnf
+```
+
+### 12. scripts/test_server.py
+
+```python
+#!/usr/bin/env python3
+import requests
+import urllib3
+import sys
+
+# Disable SSL warnings for self-signed cert
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+SERVER_IP = sys.argv[1] if len(sys.argv) > 1 else "localhost"
+BASE_URL = f"https://{SERVER_IP}:8000"
+
+def test_connection():
+    """Test basic connection"""
+    print("Testing connection...")
+    try:
+        response = requests.get(f"{BASE_URL}/", verify=False, timeout=5)
+        print("✅ Connection successful!")
+        print(f"Response: {response.json()}")
+        return True
+    except Exception as e:
+        print(f"❌ Connection failed: {e}")
+        return False
+
+def test_health():
+    """Test health endpoint"""
+    print("\nTesting health endpoint...")
+    try:
+        response = requests.get(f"{BASE_URL}/health", verify=False, timeout=5)
+        print("✅ Health check passed!")
+        print(f"Details: {response.json()}")
+        return True
+    except Exception as e:
+        print(f"❌ Health check failed: {e}")
+        return False
+
+def test_generate():
+    """Test audio generation"""
+    print("\nTesting audio generation...")
+    try:
+        response = requests.post(
+            f"{BASE_URL}/tts/generate",
+            params={
+                "text": "Holy shit, triple twenty!",
+                "quality": "great",
+                "use_personality": True
+            },
+            verify=False,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            with open("test_output.wav", "wb") as f:
+                f.write(response.content)
+            print("✅ Audio generated successfully!")
+            print("Saved as test_output.wav")
+            print(f"Cache status: {response.headers.get('X-Cache', 'Unknown')}")
+            return True
+        else:
+            print(f"❌ Generation failed: {response.status_code}")
+            return False
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return False
+
+def test_batch():
+    """Test batch pre-generation"""
+    print("\nTesting batch pre-generation...")
+    try:
+        response = requests.post(
+            f"{BASE_URL}/tts/batch-pregenerate",
+            json=[
+                {"text": "Nice throw!", "quality": "good"},
+                {"text": "Missed it!", "quality": "miss"}
+            ],
+            verify=False,
+            timeout=60
+        )
+        
+        if response.status_code == 200:
+            print("✅ Batch generation successful!")
+            print(f"Results: {response.json()}")
+            return True
+        else:
+            print(f"❌ Batch generation failed: {response.status_code}")
+            return False
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return False
+
+if __name__ == "__main__":
+    print(f"Testing Jim TTS Server at {BASE_URL}")
+    print("=" * 50)
+    
+    if test_connection():
+        test_health()
+        test_generate()
+        test_batch()
+    else:
+        print("\n💡 Troubleshooting:")
+        print("1. Is the server running? (docker-compose up)")
+        print("2. Is the firewall blocking port 8000?")
+        print("3. Is the IP address correct?")
+```
+
+### 13. .dockerignore
+
+```
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info
+dist
+build
+.git
+.gitignore
+.env
+*.log
+.DS_Store
+voices/*
+!voices/.gitkeep
+cache/*
+!cache/.gitkeep
+certs/*
+!certs/.gitkeep
+```
+
+### 14. .gitignore
+
+```
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+venv/
+env/
+
+# Cache
+cache/pregenerated/*.pkl
+
+# Voice samples
+voices/*.wav
+voices/*.mp3
+
+# Certificates
+certs/*.pem
+certs/*.key
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+test_output.wav
+```
+
+### 15. .env.example
+
+```bash
+# Server Configuration
+SERVER_HOST=0.0.0.0
+SERVER_PORT=8000
+LOG_LEVEL=INFO
+
+# TTS Configuration
+TTS_MODEL=tts_models/multilingual/multi-dataset/xtts_v2
+TTS_DEVICE=cpu  # or 'cuda' for GPU
+SPEAKER_WAV=/app/voices/jim_voice.wav
+
+# Cache Configuration
+CACHE_DIR=/app/cache/pregenerated
+PREGENERATE_ON_STARTUP=true
+
+# SSL Configuration
+SSL_CERT_PATH=/app/certs/cert.pem
+SSL_KEY_PATH=/app/certs/key.pem
+
+# CORS
+CORS_ORIGINS=*
+```
+
+### 16. README.md
+
+```markdown
+# Jim TTS Server
+
+Drunk dart commentator TTS service with voice cloning and personality enhancement.
+
+## Quick Start
+
+### Prerequisites
+- Docker & Docker Compose
+- (Optional) NVIDIA GPU with CUDA support
+
+### Setup
+
+1. Clone repository
+2. Generate SSL certificates:
+   ```bash
+   chmod +x scripts/generate_cert.sh
+   ./scripts/generate_cert.sh
+   ```
+
+3. Add voice sample:
+   ```bash
+   # Copy your jim_voice.wav to voices/
+   cp /path/to/jim_voice.wav voices/
+   ```
+
+4. Start server (CPU):
+   ```bash
+   docker-compose up --build
+   ```
+
+   Or with GPU:
+   ```bash
+   docker-compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+   ```
+
+5. Test server:
+   ```bash
+   python scripts/test_server.py
+   ```
+
+### API Usage
+
+**Generate commentary:**
+```bash
+curl -X POST "https://localhost:8000/tts/generate?text=Nice%20throw!&quality=great" \
+  --output jim_comment.wav -k
+```
+
+**Batch pre-generate:**
+```bash
+curl -X POST "https://localhost:8000/tts/batch-pregenerate" \
+  -H "Content-Type: application/json" \
+  -d '[{"text":"Great!","quality":"great"},{"text":"Miss!","quality":"miss"}]' -k
+```
+
+### iOS Setup
+
+1. Visit `https://YOUR_SERVER_IP:8000/download-cert` in Safari
+2. Install certificate profile
+3. Trust in Settings → General → About → Certificate Trust Settings
+
+## Development
+
+### Project Structure
+- `app/` - Main application code
+- `scripts/` - Utility scripts
+- `voices/` - Voice samples for cloning
+- `cache/` - Audio cache
+- `certs/` - SSL certificates
+
+### Environment Variables
+See `.env.example` for all configuration options.
+
+## Deployment
+
+### Transfer to Another Machine
+```bash
+# Save container
+docker save jim-tts-server:latest > jim-tts.tar
+
+# On new machine
+docker load < jim-tts.tar
+docker-compose up
+```
+
+### AWS Deployment (Future)
+See deployment docs for ECS/Fargate setup.
+```
+
+---
+
+## Testing & Validation
+
+After implementation, verify:
+
+1. ✅ Docker builds without errors
+2. ✅ Server starts and shows network URL
+3. ✅ Health endpoint returns 200
+4. ✅ Can generate single commentary
+5. ✅ Can batch pre-generate
+6. ✅ Audio cache works
+7. ✅ Personality enhancement applies
+8. ✅ Certificate download works
+
+---
+
+## Common Commands
+
+```bash
+# Build container
+docker-compose build
+
+# Start server (CPU)
+docker-compose up
+
+# Start server (GPU)
+docker-compose -f docker-compose.yml -f docker-compose.gpu.yml up
+
+# View logs
+docker-compose logs -f
+
+# Stop server
+docker-compose down
+
+# Enter container
+docker-compose exec tts-server bash
+
+# Test server
+python scripts/test_server.py localhost
+
+# Clear cache
+curl -X DELETE https://localhost:8000/cache/clear -k
+```
+
+---
+
+## Troubleshooting
+
+### GPU not detected
+```bash
+# Verify NVIDIA runtime
+docker run --rm --gpus all nvidia/cuda:12.1.0-base-ubuntu22.04 nvidia-smi
+```
+
+### Port 8000 in use
+```bash
+# Find process
+lsof -i :8000  # Mac/Linux
+netstat -ano | findstr :8000  # Windows
+
+# Change port in docker-compose.yml
+```
+
+### TTS model fails to load
+```bash
+# Pre-download model
+docker-compose exec tts-server python -c "from TTS.api import TTS; TTS('tts_models/multilingual/multi-dataset/xtts_v2')"
+```
+
+---
+
+## Performance
+
+### CPU (M1 Mac)
+- First generation: ~15-20 seconds
+- Cached: Instant (<100ms)
+
+### GPU (RTX 3070+)
+- First generation: ~2-3 seconds
+- Cached: Instant (<100ms)
+
+---
+
+## Next Steps
+
+1. Record and add jim_voice.wav
+2. Test on local network
+3. Transfer to Windows desktop with GPU
+4. Validate with iOS app
+5. Deploy to AWS when ready
+
+---
+
+**Version:** 1.0.0  
+**Last Updated:** 2025-01-XX

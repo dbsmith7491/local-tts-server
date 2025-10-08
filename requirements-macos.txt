@@ -1,0 +1,20 @@
+# FastAPI and server
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+python-multipart==0.0.6
+
+# MLX-Audio for Apple Silicon (much faster than XTTS on M-series)
+mlx-audio>=0.1.0
+
+# Audio processing (MLX-Audio requires numpy>=1.26.4)
+scipy>=1.11.4
+numpy>=1.26.4
+soundfile==0.12.1
+
+# Utilities
+pydantic==2.5.3
+pydantic-settings==2.1.0
+python-dotenv==1.0.0
+
+# HTTP client for testing
+requests==2.31.0

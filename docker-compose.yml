@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  tts-server:
+    build: .
+    container_name: jim-tts-server
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./voices:/app/voices:ro
+      - ./cache:/app/cache
+      - ./certs:/app/certs:ro
+      - ./tts_config:/root/.local/share/tts
+    environment:
+      - TTS_DEVICE=cpu
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8000
+      - LOG_LEVEL=INFO
+      - TTS_MODEL=tts_models/multilingual/multi-dataset/xtts_v2
+      - SPEAKER_WAV=/app/voices/jim_voice.wav
+      - CACHE_DIR=/app/cache/pregenerated
+      - PREGENERATE_ON_STARTUP=true
+      - SSL_CERT_PATH=/app/certs/cert.pem
+      - SSL_KEY_PATH=/app/certs/key.pem
+      - CORS_ORIGINS=["*"]
+    healthcheck:
+      test: ["CMD", "curl", "-k", "-f", "https://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s

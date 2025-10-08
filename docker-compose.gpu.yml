@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  tts-server:
+    extends:
+      file: docker-compose.yml
+      service: tts-server
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - TTS_DEVICE=cuda
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8000
+      - LOG_LEVEL=INFO
+      - TTS_MODEL=tts_models/multilingual/multi-dataset/xtts_v2
+      - SPEAKER_WAV=/app/voices/jim_voice.wav
+      - CACHE_DIR=/app/cache/pregenerated
+      - PREGENERATE_ON_STARTUP=true
+      - SSL_CERT_PATH=/app/certs/cert.pem
+      - SSL_KEY_PATH=/app/certs/key.pem
+      - CORS_ORIGINS=["*"]

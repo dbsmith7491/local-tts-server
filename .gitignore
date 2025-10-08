@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+venv/
+env/
+
+# Cache
+cache/
+!cache/.gitkeep
+!cache/pregenerated/
+cache/pregenerated/*.pkl
+
+# Voice samples (exclude actual audio files, keep directory structure)
+voices/*.wav
+voices/*.mp3
+voices/*.m4a
+
+# TTS model cache
+tts_config/
+
+# Certificates
+certs/*.pem
+certs/*.key
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+test_output.wav
+test_*.py
+test_*.wav
+heather*.wav
+
+# MLX models
+mlx_models/
